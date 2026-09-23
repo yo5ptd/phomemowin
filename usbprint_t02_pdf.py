@@ -65,6 +65,8 @@ def send_image_to_printer(img):
                 x = x_byte * 8 + bit
                 if img.getpixel((x, y)) == 0:
                     byte |= (1 << (7 - bit))
+                if byte == 0x0A:
+                    byte = 0x14
             raster_data.append(byte)
 
     print(f"Connecting to {PORT}...")
@@ -81,7 +83,7 @@ def send_image_to_printer(img):
     ser.write(b'\x1b\x40')
     ser.write(b'\x1b\x61\x01')
     ser.write(b'\x1f\x11\x02\x04')
-    time.sleep(0.1)
+    time.sleep(1)
 
     chunk_size = 255
     offset = 0
@@ -101,7 +103,7 @@ def send_image_to_printer(img):
         header = bytes([0x1d, 0x76, 0x30, mode, xL, xH, yL, yH])
         ser.write(header + chunk_bytes)
         ser.flush()
-        time.sleep(0.02)
+        time.sleep(2)
         
         offset += lines_to_send
 

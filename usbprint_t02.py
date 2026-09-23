@@ -20,11 +20,15 @@ def process_image(image_path):
     target_width = 384
     wpercent = (target_width / float(img.size[0]))
     target_height = int(float(img.size[1]) * float(wpercent))
+    print("IMG wpercent:", wpercent, " target_height:", target_height)
     
-    img = img.resize((target_width, target_height), Image.Resampling.LANCZOS)
+    if (wpercent!=1.0):
+        img = img.resize((target_width, target_height), Image.Resampling.LANCZOS)
     img = img.convert("1")
     
     width, height = img.size
+    print("Img width:", width, " height:", height)
+        
     bytes_per_line = width // 8
     
     raster_data = bytearray()
@@ -36,9 +40,91 @@ def process_image(image_path):
                 # 0 = black dot, 1 = white dot
                 if img.getpixel((x, y)) == 0:
                     byte |= (1 << (7 - bit))
+                if byte == 0x0A:
+                    byte = 0x14
             raster_data.append(byte)
             
     return raster_data, bytes_per_line, height
+
+def raster_to_bw_art(raster_data: bytes, bytes_per_line: int, height: int) -> str:
+    """
+    1-bpp packed raster (bytes_per_line == 48 → 384 px wide)
+    → exactly 192 characters per line.
+    Each character covers 2×2 source pixels (no aspect-ratio compensation).
+    """
+    assert bytes_per_line == 48
+
+    SRC_W  = 384
+    OUT_W  = 192
+    CELL_W = 2
+    CELL_H = 2          # same as width → no aspect compensation
+
+    SYMBOLS = [
+        (" ",  0x0000000000000000),   # empty
+        ("▀",  0xffffffff00000000),   # upper half
+        ("▄",  0x00000000ffffffff),   # lower half
+        ("█",  0xffffffffffffffff),   # full
+        ("▌",  0xf0f0f0f0f0f0f0f0),   # left half
+        ("▐",  0x0f0f0f0f0f0f0f0f),   # right half
+        ("▖",  0x00000000f0f0f0f0),   # lower-left (corrected from 0x0f...)
+        ("▗",  0x000000000f0f0f0f),   # lower-right (corrected from 0xf0...)
+        ("▘",  0xf0f0f0f000000000),   # upper-left (corrected from 0x0f...)
+        ("▝",  0x0f0f0f0f00000000),   # upper-right (corrected from 0xf0...)
+        ("▚",  0xf0f0f0f00f0f0f0f),   # diagonal
+        ("▞",  0x0f0f0f0ff0f0f0f0),   # other diagonal
+    ]
+
+    def get_pixel(x: int, y: int) -> int:
+        if x < 0 or y < 0 or x >= SRC_W or y >= height:
+            return 0
+        byte = raster_data[y * bytes_per_line + (x >> 3)]
+        return (byte >> (7 - (x & 7))) & 1
+
+    def cell_bitmap(cx: int, cy: int) -> int:
+        """
+        Build an 8×8 bitmap from a 2×2 source window.
+        Left pixel → left half of glyph, right pixel → right half.
+        Top row of source → top half of glyph, bottom row → bottom half.
+        """
+        # sample the 2×2 block
+        tl = get_pixel(cx,     cy)
+        tr = get_pixel(cx + 1, cy)
+        bl = get_pixel(cx,     cy + 1)
+        br = get_pixel(cx + 1, cy + 1)
+
+        bm = 0
+        for row in range(8):
+            # top 4 glyph rows ← top source row, bottom 4 ← bottom source row
+            left  = tl if row < 4 else bl
+            right = tr if row < 4 else br
+            for col in range(8):
+                val = left if col < 4 else right
+                if val:
+                    bm |= 1 << (63 - (row * 8 + col))
+        return bm
+
+    def best_symbol(bm: int) -> str:
+        best_ch = " "
+        best_dist = 65
+        for ch, glyph in SYMBOLS:
+            dist = bin(bm ^ glyph).count("1")
+            if dist < best_dist:
+                best_dist = dist
+                best_ch = ch
+        return best_ch
+
+    lines = []
+    y = 0
+    while y < height:
+        row = []
+        for col in range(OUT_W):
+            cx = col * CELL_W
+            bm = cell_bitmap(cx, y)
+            row.append(best_symbol(bm))
+        lines.append("".join(row))          # exactly 192 chars
+        y += CELL_H
+
+    return "\n".join(lines)
 
 def send_to_printer(raster_data, bytes_per_line, height):
     print(f"Connecting to {PORT}...")
@@ -56,11 +142,11 @@ def send_to_printer(raster_data, bytes_per_line, height):
     ser.write(b'\x1b\x40')         # ESC @: Initialize printer
     ser.write(b'\x1b\x61\x01')     # ESC a 1: Center alignment
     ser.write(b'\x1f\x11\x02\x04') # Proprietary config packet
-    time.sleep(0.1)
+    time.sleep(1)
 
     # 2. Send image chunks with pacing to prevent buffer overflow
     # T02 max chunk height is 255 lines per block marker
-    chunk_size = 255
+    chunk_size = 100
     offset = 0
     
     print(f"Streaming {height} lines of raster data...")
@@ -82,7 +168,7 @@ def send_to_printer(raster_data, bytes_per_line, height):
         # Send header + chunk data with a small pacing delay
         ser.write(header + chunk_bytes)
         ser.flush()
-        time.sleep(0.02) # Give the Nuvoton serial buffer time to empty
+        time.sleep(2) # Give the Nuvoton serial buffer time to empty
         
         offset += lines_to_send
 
@@ -106,5 +192,8 @@ if __name__ == "__main__":
         
     image_file = sys.argv[1]
     data, b_line, img_h = process_image(image_file)
+    print("B_line:", b_line, " Height:", img_h, " len:", data.count)
+    art = raster_to_bw_art(data, b_line, img_h)
+    print(art)
     send_to_printer(data, b_line, img_h)
-    
+        
