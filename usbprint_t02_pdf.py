@@ -85,7 +85,7 @@ def send_image_to_printer(img):
     ser.write(b'\x1f\x11\x02\x04')
     time.sleep(1)
 
-    chunk_size = 255
+    chunk_size = 100
     offset = 0
     
     print(f"Streaming {height} lines of thermal raster data...")
